@@ -1,0 +1,9 @@
+[package]
+name = "crystald"
+version = "0.1.0"
+authors = ["Tommy Hudson <cookie.hudson@gmail.com>"]
+
+[dependencies]
+redox_syscall = "0.1"
+redox_event = "0.1"
+rand = "0.3"
