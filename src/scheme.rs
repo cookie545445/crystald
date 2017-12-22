@@ -187,6 +187,40 @@ impl SchemeMut for AudioScheme {
         }
         Ok(0)
     }
+
+    fn close(&mut self, id: usize) -> Result<usize> {
+        if !self.used_file_ids.remove(&id) {
+            return Err(Error::new(EBADF));
+        }
+        if let Some(name) = self.endpoint_ids_to_name.remove(&id) {
+            let endpoint = self.endpoints.remove(&name).unwrap();
+            for conn_id in endpoint.connections {
+                self.scheme_file.borrow_mut().write(&Packet {
+                    id: 0,
+                    pid: 0,
+                    uid: 0,
+                    gid: 0,
+                    a: syscall::number::SYS_FEVENT,
+                    b: conn_id,
+                    c: syscall::EVENT_WRITE,
+                    d: 0,   // zero-size buffer, endpoint is closed
+                }).expect("failed to write to scheme file");
+                self.connections.remove(&conn_id);
+            }
+            return Ok(0);
+        }
+
+        if let Some(name) = self.connections.remove(&id) {
+            let endpoint = self.endpoints.get_mut(&name).unwrap();
+            endpoint.connections.remove(&id);
+            if let EndpointType::Sink { ref mut input_buffers } = endpoint.endpoint_type {
+                input_buffers.remove(&id);
+            }
+            return Ok(0);
+        }
+
+        unreachable!(); // theoretically
+    }
 }
 
 fn gen_file_id(used_ids: &mut BTreeSet<usize>) -> usize {
