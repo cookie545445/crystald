@@ -28,12 +28,12 @@ fn main() {
                 }
 
                 scheme.borrow_mut().handle(&mut packet);
-                socket_closure.borrow_mut().write(&mut packet);
+                socket_closure.borrow_mut().write(&mut packet).unwrap();
             }
             Ok(None)
         }).expect("failed to catch events on scheme");
         loop {
-            event_queue.run();
+            event_queue.run().unwrap();
         }
     }
 }

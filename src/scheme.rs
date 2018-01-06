@@ -1,4 +1,4 @@
-use std::collections::{HashMap, BTreeMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::fs::File;
@@ -14,7 +14,7 @@ use rand::random;
 use std::str;
 
 struct Endpoint {
-    file_id: usize,
+    name: String,
     buffer: Vec<i32>,
     connections: BTreeSet<usize>,
     endpoint_type: EndpointType,
@@ -22,14 +22,13 @@ struct Endpoint {
 
 enum EndpointType {
     Source,
-    Sink { input_buffers: BTreeMap<usize, Vec<i32>> },
+    Sink { inputs: BTreeSet<usize> },
 }
 
 pub struct AudioScheme {
     scheme_file: Rc<RefCell<File>>,
-    endpoint_ids_to_name: BTreeMap<usize, String>,
-    endpoints: HashMap<String, Endpoint>,
-    connections: BTreeMap<usize, String>,
+    endpoint_name_to_id: HashMap<String, usize>,
+    endpoints: HashMap<usize, Endpoint>,
     used_file_ids: BTreeSet<usize>,
 }
 
@@ -37,31 +36,32 @@ impl AudioScheme {
     pub fn new(scheme_file: Rc<RefCell<File>>) -> Self {
         AudioScheme {
             scheme_file,
-            endpoint_ids_to_name: BTreeMap::new(),
+            endpoint_name_to_id: HashMap::new(),
             endpoints: HashMap::new(),
-            connections: BTreeMap::new(),
             used_file_ids: BTreeSet::new(),
         }
     }
 }
 
 impl SchemeMut for AudioScheme {
-    fn open(&mut self, path: &[u8], flags: usize, uid: u32, gid: u32) -> Result<usize> {
+    fn open(&mut self, path: &[u8], flags: usize, _uid: u32, _gid: u32) -> Result<usize> {
         let path = str::from_utf8(path).or(Err(Error::new(EINVAL)))?;
         let (name, args) = {
             let mut iter = path.split('?');
             (iter.next().unwrap(), iter.nth(1).ok_or(Error::new(EINVAL))?)
         };
-        let args_iter = args.split('&')
-            .map(|key_equals_value| {
-                     let mut key_equals_value = key_equals_value.split('=');
-                     let key = key_equals_value.next();
-                     let value = key_equals_value.next();
-                     (key, value)
-                 });
+        let args_iter = args.split('&').map(|key_equals_value| {
+            let mut key_equals_value = key_equals_value.split('=');
+            let key = key_equals_value.next();
+            let value = key_equals_value.next();
+            (key, value)
+        });
         let mut args = HashMap::new();
         for (key, value) in args_iter {
-            let (key, value) = (key.ok_or(Error::new(EINVAL))?, value.ok_or(Error::new(EINVAL))?);
+            let (key, value) = (
+                key.ok_or(Error::new(EINVAL))?,
+                value.ok_or(Error::new(EINVAL))?,
+            );
             if let Some(_) = args.insert(key, value) {
                 // key was set twice
                 return Err(Error::new(EINVAL));
@@ -74,35 +74,34 @@ impl SchemeMut for AudioScheme {
                 .ok_or(Error::new(EINVAL))?
                 .parse()
                 .map_err(|_| Error::new(EINVAL))?;
-            self.endpoints
-                .insert(name.to_owned(), match flags & O_RDWR {
-                    O_RDONLY => {
-                        Endpoint {
-                            file_id,
-                            buffer: vec![0; buffer_size],
-                            connections: BTreeSet::new(),
-                            endpoint_type: EndpointType::Sink { input_buffers: BTreeMap::new() },
-                        }
+            self.endpoints.insert(
+                file_id,
+                match flags & O_RDWR {
+                    O_RDONLY => Endpoint {
+                        name: name.to_owned(),
+                        buffer: vec![0; buffer_size],
+                        connections: BTreeSet::new(),
+                        endpoint_type: EndpointType::Sink {
+                            inputs: BTreeSet::new(),
+                        },
                     },
-                    O_WRONLY => {
-                        Endpoint {
-                            file_id,
-                            buffer: vec![0; buffer_size],
-                            connections: BTreeSet::new(),
-                            endpoint_type: EndpointType::Source,
-                        }
+                    O_WRONLY => Endpoint {
+                        name: name.to_owned(),
+                        buffer: vec![0; buffer_size],
+                        connections: BTreeSet::new(),
+                        endpoint_type: EndpointType::Source,
                     },
                     _ => return Err(Error::new(EINVAL)),
-                });
-            self.endpoint_ids_to_name.insert(file_id, name.to_owned());
+                },
+            );
+            self.endpoint_name_to_id.insert(name.to_owned(), file_id);
         } else {
-            self.endpoints.get_mut(name).ok_or(Error::new(ENOENT))?.connections.insert(file_id);
-            self.connections.insert(file_id, name.to_owned());
+            return Err(Error::new(EINVAL));
         }
         Ok(file_id)
     }
 
-    fn fevent(&mut self, id: usize, flags: usize) -> Result<usize> {
+    fn fevent(&mut self, id: usize, _flags: usize) -> Result<usize> {
         if self.used_file_ids.contains(&id) {
             Ok(id)
         } else {
@@ -118,40 +117,23 @@ impl SchemeMut for AudioScheme {
             return Err(Error::new(EINVAL));
         }
 
-        if let Some(name) = self.endpoint_ids_to_name.get(&id) {
-            let endpoint = self.endpoints.get(name).unwrap();
+        if let Some(endpoint) = self.endpoints.get(&id) {
             if size != endpoint.buffer.len() {
                 return Err(Error::new(EINVAL));
             }
             return Ok(endpoint.buffer.as_slice().as_ptr() as usize);
-        } else if let Some(connected_name) = self.connections.get(&id) {
-            let endpoint = self.endpoints.get(connected_name).unwrap();
-            if size != endpoint.buffer.len() {
-                return Err(Error::new(EINVAL));
-            }
-
-            match endpoint.endpoint_type {
-                EndpointType::Sink { ref input_buffers } => {
-                    return Ok(input_buffers.get(&id).unwrap().as_slice().as_ptr() as usize);
-                },
-                EndpointType::Source => {
-                    return Ok(endpoint.buffer.as_slice().as_ptr() as usize);
-                },
-            }
         } else {
             return Err(Error::new(EBADF));
         }
     }
 
     fn fsync(&mut self, id: usize) -> Result<usize> {
-        let endpoint = {
-            let name = self.endpoint_ids_to_name.get(&id).ok_or(Error::new(EBADF))?;
-            self.endpoints.get_mut(name).unwrap()
-        };
-        match &endpoint.endpoint_type {
-            &EndpointType::Source => {
-                for file_id in endpoint.connections.iter() {
-                    self.scheme_file.borrow_mut().write(&Packet {
+        let mut endpoint = self.endpoints.remove(&id).ok_or(Error::new(EBADF))?;
+        match endpoint.endpoint_type {
+            EndpointType::Source => for file_id in endpoint.connections.iter() {
+                self.scheme_file
+                    .borrow_mut()
+                    .write(&Packet {
                         id: 0,
                         pid: 0,
                         uid: 0,
@@ -160,31 +142,36 @@ impl SchemeMut for AudioScheme {
                         b: *file_id,
                         c: syscall::EVENT_READ,
                         d: endpoint.buffer.len(),
-                    }).expect("failed to write to scheme file");
-                }
+                    })
+                    .expect("failed to write to scheme file");
             },
-            &EndpointType::Sink { ref input_buffers } => {
+            EndpointType::Sink { ref inputs } => {
                 // mixing time!
-                for buffer in input_buffers.values() {
+                for input in inputs {
+                    let buffer = &self.endpoints.get(input).unwrap().buffer;
                     for (idx, val) in endpoint.buffer.iter_mut().enumerate() {
                         *val += buffer[idx] / 2;
                     }
                 }
 
                 for file_id in endpoint.connections.iter() {
-                    self.scheme_file.borrow_mut().write(&Packet {
-                        id: 0,
-                        pid: 0,
-                        uid: 0,
-                        gid: 0,
-                        a: syscall::number::SYS_FEVENT,
-                        b: *file_id,
-                        c: syscall::EVENT_WRITE,
-                        d: endpoint.buffer.len(),
-                    }).expect("failed to write to scheme file");
+                    self.scheme_file
+                        .borrow_mut()
+                        .write(&Packet {
+                            id: 0,
+                            pid: 0,
+                            uid: 0,
+                            gid: 0,
+                            a: syscall::number::SYS_FEVENT,
+                            b: *file_id,
+                            c: syscall::EVENT_WRITE,
+                            d: endpoint.buffer.len(),
+                        })
+                        .expect("failed to write to scheme file");
                 }
-            },
+            }
         }
+        self.endpoints.insert(id, endpoint);
         Ok(0)
     }
 
@@ -192,29 +179,22 @@ impl SchemeMut for AudioScheme {
         if !self.used_file_ids.remove(&id) {
             return Err(Error::new(EBADF));
         }
-        if let Some(name) = self.endpoint_ids_to_name.remove(&id) {
-            let endpoint = self.endpoints.remove(&name).unwrap();
+        if let Some(endpoint) = self.endpoints.remove(&id) {
+            self.endpoint_name_to_id.remove(&endpoint.name);
             for conn_id in endpoint.connections {
-                self.scheme_file.borrow_mut().write(&Packet {
-                    id: 0,
-                    pid: 0,
-                    uid: 0,
-                    gid: 0,
-                    a: syscall::number::SYS_FEVENT,
-                    b: conn_id,
-                    c: syscall::EVENT_WRITE,
-                    d: 0,   // zero-size buffer, endpoint is closed
-                }).expect("failed to write to scheme file");
-                self.connections.remove(&conn_id);
-            }
-            return Ok(0);
-        }
-
-        if let Some(name) = self.connections.remove(&id) {
-            let endpoint = self.endpoints.get_mut(&name).unwrap();
-            endpoint.connections.remove(&id);
-            if let EndpointType::Sink { ref mut input_buffers } = endpoint.endpoint_type {
-                input_buffers.remove(&id);
+                self.scheme_file
+                    .borrow_mut()
+                    .write(&Packet {
+                        id: 0,
+                        pid: 0,
+                        uid: 0,
+                        gid: 0,
+                        a: syscall::number::SYS_FEVENT,
+                        b: conn_id,
+                        c: syscall::EVENT_WRITE,
+                        d: 0, // zero-size buffer, endpoint is closed
+                    })
+                    .expect("failed to write to scheme file");
             }
             return Ok(0);
         }
