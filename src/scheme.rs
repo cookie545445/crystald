@@ -18,11 +18,12 @@ struct Endpoint {
     buffer: Vec<i32>,
     connections: BTreeSet<usize>,
     endpoint_type: EndpointType,
+    clock_source: Option<usize>,
 }
 
 enum EndpointType {
     Source,
-    Sink { inputs: BTreeSet<usize> },
+    Sink,
 }
 
 pub struct AudioScheme {
@@ -81,15 +82,15 @@ impl SchemeMut for AudioScheme {
                         name: name.to_owned(),
                         buffer: vec![0; buffer_size],
                         connections: BTreeSet::new(),
-                        endpoint_type: EndpointType::Sink {
-                            inputs: BTreeSet::new(),
-                        },
+                        endpoint_type: EndpointType::Sink,
+                        clock_source: None,
                     },
                     O_WRONLY => Endpoint {
                         name: name.to_owned(),
                         buffer: vec![0; buffer_size],
                         connections: BTreeSet::new(),
                         endpoint_type: EndpointType::Source,
+                        clock_source: None,
                     },
                     _ => return Err(Error::new(EINVAL)),
                 },
@@ -131,30 +132,7 @@ impl SchemeMut for AudioScheme {
         let mut endpoint = self.endpoints.remove(&id).ok_or(Error::new(EBADF))?;
         match endpoint.endpoint_type {
             EndpointType::Source => for file_id in endpoint.connections.iter() {
-                self.scheme_file
-                    .borrow_mut()
-                    .write(&Packet {
-                        id: 0,
-                        pid: 0,
-                        uid: 0,
-                        gid: 0,
-                        a: syscall::number::SYS_FEVENT,
-                        b: *file_id,
-                        c: syscall::EVENT_READ,
-                        d: endpoint.buffer.len(),
-                    })
-                    .expect("failed to write to scheme file");
-            },
-            EndpointType::Sink { ref inputs } => {
-                // mixing time!
-                for input in inputs {
-                    let buffer = &self.endpoints.get(input).unwrap().buffer;
-                    for (idx, val) in endpoint.buffer.iter_mut().enumerate() {
-                        *val += buffer[idx] / 2;
-                    }
-                }
-
-                for file_id in endpoint.connections.iter() {
+                if self.endpoints.get(file_id).unwrap().clock_source == Some(id) {
                     self.scheme_file
                         .borrow_mut()
                         .write(&Packet {
@@ -164,10 +142,35 @@ impl SchemeMut for AudioScheme {
                             gid: 0,
                             a: syscall::number::SYS_FEVENT,
                             b: *file_id,
-                            c: syscall::EVENT_WRITE,
+                            c: syscall::EVENT_READ,
                             d: endpoint.buffer.len(),
                         })
                         .expect("failed to write to scheme file");
+                }
+            },
+            EndpointType::Sink => {
+                // mixing time!
+                for file_id in endpoint.connections.iter() {
+                    let buffer = &self.endpoints.get(file_id).unwrap().buffer;
+                    for (idx, val) in endpoint.buffer.iter_mut().enumerate() {
+                        *val += buffer[idx] / 2;
+                    }
+
+                    if self.endpoints.get(&file_id).unwrap().clock_source == Some(id) {
+                        self.scheme_file
+                            .borrow_mut()
+                            .write(&Packet {
+                                id: 0,
+                                pid: 0,
+                                uid: 0,
+                                gid: 0,
+                                a: syscall::number::SYS_FEVENT,
+                                b: *file_id,
+                                c: syscall::EVENT_WRITE,
+                                d: endpoint.buffer.len(),
+                            })
+                            .expect("failed to write to scheme file");
+                    }
                 }
             }
         }
