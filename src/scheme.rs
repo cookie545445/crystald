@@ -75,26 +75,29 @@ impl SchemeMut for AudioScheme {
                 .ok_or(Error::new(EINVAL))?
                 .parse()
                 .map_err(|_| Error::new(EINVAL))?;
-            self.endpoints.insert(
-                file_id,
-                match flags & O_RDWR {
-                    O_RDONLY => Endpoint {
-                        name: name.to_owned(),
-                        buffer: vec![0; buffer_size],
-                        connections: BTreeSet::new(),
-                        endpoint_type: EndpointType::Sink,
-                        clock_source: None,
-                    },
-                    O_WRONLY => Endpoint {
-                        name: name.to_owned(),
-                        buffer: vec![0; buffer_size],
-                        connections: BTreeSet::new(),
-                        endpoint_type: EndpointType::Source,
-                        clock_source: None,
-                    },
-                    _ => return Err(Error::new(EINVAL)),
+            let mut endpoint = match flags & O_RDWR {
+                O_RDONLY => Endpoint {
+                    name: name.to_owned(),
+                    buffer: vec![0; buffer_size],
+                    connections: BTreeSet::new(),
+                    endpoint_type: EndpointType::Sink,
+                    clock_source: None,
                 },
-            );
+                O_WRONLY => Endpoint {
+                    name: name.to_owned(),
+                    buffer: vec![0; buffer_size],
+                    connections: BTreeSet::new(),
+                    endpoint_type: EndpointType::Source,
+                    clock_source: None,
+                },
+                _ => return Err(Error::new(EINVAL)),
+            };
+            if let Some(name) = args.get("connect") {
+                let conn_id = self.endpoint_name_to_id.get(*name).ok_or(Error::new(EINVAL))?;
+                endpoint.connections.insert(*conn_id);
+                self.endpoints.get_mut(conn_id).unwrap().connections.insert(file_id);
+            }
+            self.endpoints.insert(file_id, endpoint);
             self.endpoint_name_to_id.insert(name.to_owned(), file_id);
         } else {
             return Err(Error::new(EINVAL));
@@ -151,12 +154,15 @@ impl SchemeMut for AudioScheme {
             EndpointType::Sink => {
                 // mixing time!
                 for file_id in endpoint.connections.iter() {
-                    let buffer = &self.endpoints.get(file_id).unwrap().buffer;
+                    let connected = self.endpoints.get_mut(&file_id).unwrap();
                     for (idx, val) in endpoint.buffer.iter_mut().enumerate() {
-                        *val += buffer[idx] / 2;
+                        *val += connected.buffer[idx] / 2;
                     }
 
-                    if self.endpoints.get(&file_id).unwrap().clock_source == Some(id) {
+                    if connected.clock_source == None {
+                        connected.clock_source = Some(id);
+                    }
+                    if connected.clock_source == Some(id) {
                         self.scheme_file
                             .borrow_mut()
                             .write(&Packet {
@@ -202,7 +208,7 @@ impl SchemeMut for AudioScheme {
             return Ok(0);
         }
 
-        unreachable!(); // theoretically
+        panic!("file id marked as used but wasn't");
     }
 }
 
