@@ -7,3 +7,4 @@ authors = ["Tommy Hudson <cookie.hudson@gmail.com>"]
 redox_syscall = "0.1"
 redox_event = "0.1"
 rand = "0.3"
+termion = "1.5"
