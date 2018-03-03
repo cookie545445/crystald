@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::Write;
+use std::str;
 
 use syscall;
 use syscall::scheme::SchemeMut;
@@ -11,11 +12,11 @@ use syscall::flag::*;
 use syscall::error::*;
 use rand::random;
 
-use std::str;
+use buffer::AudioBuffer;
 
 struct Endpoint {
     name: String,
-    buffer: Vec<i32>,
+    buffer: AudioBuffer<i32>,
     connections: BTreeSet<usize>,
     endpoint_type: EndpointType,
     clock_source: Option<usize>,
@@ -49,7 +50,7 @@ impl SchemeMut for AudioScheme {
         let path = str::from_utf8(path).or(Err(Error::new(EINVAL)))?;
         let (name, args) = {
             let mut iter = path.split('?');
-            (iter.next().unwrap(), iter.nth(1).ok_or(Error::new(EINVAL))?)
+            (iter.next().unwrap(), iter.next().ok_or(Error::new(EINVAL))?)
         };
         let args_iter = args.split('&').map(|key_equals_value| {
             let mut key_equals_value = key_equals_value.split('=');
@@ -78,24 +79,27 @@ impl SchemeMut for AudioScheme {
             let mut endpoint = match flags & O_RDWR {
                 O_RDONLY => Endpoint {
                     name: name.to_owned(),
-                    buffer: vec![0; buffer_size],
+                    buffer: AudioBuffer::new(buffer_size),
                     connections: BTreeSet::new(),
                     endpoint_type: EndpointType::Sink,
                     clock_source: None,
                 },
                 O_WRONLY => Endpoint {
                     name: name.to_owned(),
-                    buffer: vec![0; buffer_size],
+                    buffer: AudioBuffer::new(buffer_size),
                     connections: BTreeSet::new(),
                     endpoint_type: EndpointType::Source,
                     clock_source: None,
                 },
                 _ => return Err(Error::new(EINVAL)),
             };
-            if let Some(name) = args.get("connect") {
-                let conn_id = self.endpoint_name_to_id.get(*name).ok_or(Error::new(EINVAL))?;
-                endpoint.connections.insert(*conn_id);
-                self.endpoints.get_mut(conn_id).unwrap().connections.insert(file_id);
+            if let Some(conn_names) = args.get("connect") {
+                let conn_names = conn_names.split(',');
+                for conn_name in conn_names {
+                    let conn_id = self.endpoint_name_to_id.get(conn_name).ok_or(Error::new(EINVAL))?;
+                    endpoint.connections.insert(*conn_id);
+                    self.endpoints.get_mut(conn_id).unwrap().connections.insert(file_id);
+                }
             }
             self.endpoints.insert(file_id, endpoint);
             self.endpoint_name_to_id.insert(name.to_owned(), file_id);
@@ -122,10 +126,10 @@ impl SchemeMut for AudioScheme {
         }
 
         if let Some(endpoint) = self.endpoints.get(&id) {
-            if size != endpoint.buffer.len() {
+            if size != endpoint.buffer.len() * 4 {
                 return Err(Error::new(EINVAL));
             }
-            return Ok(endpoint.buffer.as_slice().as_ptr() as usize);
+            return Ok(endpoint.buffer.as_ptr() as usize);
         } else {
             return Err(Error::new(EBADF));
         }
@@ -152,9 +156,13 @@ impl SchemeMut for AudioScheme {
                 }
             },
             EndpointType::Sink => {
+                for val in endpoint.buffer.iter_mut() {
+                    *val = 0;
+                }
                 // mixing time!
                 for file_id in endpoint.connections.iter() {
                     let connected = self.endpoints.get_mut(&file_id).unwrap();
+                    println!("mixing to {} from {} (whose clock source is {:?})", endpoint.name, connected.name, connected.clock_source);
                     for (idx, val) in endpoint.buffer.iter_mut().enumerate() {
                         *val += connected.buffer[idx] / 2;
                     }

@@ -11,6 +11,7 @@ use std::io::{Result, Read, Write};
 use syscall::data::Packet;
 use syscall::SchemeMut;
 
+mod buffer;
 mod scheme;
 
 fn main() {
